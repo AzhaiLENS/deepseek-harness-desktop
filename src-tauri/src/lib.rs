@@ -16,6 +16,7 @@
 //! behave exactly as they do for the CLI.
 
 mod config;
+mod geometry;
 mod payload;
 mod runtime;
 mod update;
@@ -91,7 +92,9 @@ pub fn run() {
     install_signal_bridge();
 
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // 这里**故意不挂** tauri-plugin-window-state：它把窗口尺寸按物理像素存盘、
+        // 再按物理像素还原，于是在 2x 高分屏上会把窗口缩成一半逻辑点（界面被压扁、
+        // 启动页底部被裁）。几何持久化改由 geometry.rs 用逻辑点实现。
         .invoke_handler(tauri::generate_handler![
             get_status,
             get_log,
@@ -102,6 +105,10 @@ pub fn run() {
         ])
         .setup(|app| {
             let handle = app.handle().clone();
+
+            // 单实例守卫：同一份数据目录跑两个实例会互相踩（会话索引、设置、
+            // 凭据都是「读-改-写」）。第二个实例把已有窗口带到前台后立刻退出。
+            claim_single_instance(&handle);
 
             // The splash window is declared in tauri.conf.json and tears itself
             // down once the DSH server is up.
@@ -124,13 +131,30 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             match event {
+                // 窗口几何：尺寸/位置变化后写盘（逻辑点，见 geometry.rs）。
+                // Resized/Moved 会连发，节流器把它们合并成一次写入。
+                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_)
+                    if window.label() == "main" =>
+                {
+                    if let Some(target) = window.app_handle().get_webview_window("main") {
+                        if let Some(throttle) = window.try_state::<geometry::Throttle>() {
+                            geometry::save_event(&target, Some(&throttle));
+                        }
+                    }
+                }
                 // 关窗 ≠ 退出（报告 A3）：隐藏窗口，服务与长任务继续跑；
                 // Dock 点图标或再次启动时重开窗口。真正退出走 ⌘Q / Dock 退出。
                 tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
+                    if let Some(target) = window.app_handle().get_webview_window("main") {
+                        geometry::save_event(&target, None);
+                    }
                     api.prevent_close();
                     let _ = window.hide();
                 }
                 tauri::WindowEvent::Destroyed if window.label() == "main" => {
+                    if let Some(target) = window.app_handle().get_webview_window("main") {
+                        geometry::save_event(&target, None);
+                    }
                     if let Some(state) = window.try_state::<Mutex<AppState>>() {
                         if let Ok(mut state) = state.lock() {
                             if let Some(server) = state.server.as_mut() {
@@ -166,6 +190,10 @@ pub fn run() {
         }
         // ⌘Q / Dock 退出：优雅关停 DSH 服务（报告 F2 的温和面）。
         tauri::RunEvent::ExitRequested { .. } => {
+            // 退出前把窗口几何落盘（强制写，不受节流影响）。
+            if let Some(window) = app_handle.get_webview_window("main") {
+                geometry::save_event(&window, None);
+            }
             if let Some(state) = app_handle.try_state::<Mutex<AppState>>() {
                 if let Ok(mut state) = state.lock() {
                     if let Some(server) = state.server.as_mut() {
@@ -235,7 +263,7 @@ extern "C" fn on_signal(_sig: i32) {
 fn install_signal_bridge() {
     for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         unsafe {
-            libc::signal(sig, on_signal as usize);
+            libc::signal(sig, on_signal as *const () as usize);
         }
     }
     std::thread::spawn(|| loop {
@@ -383,6 +411,10 @@ fn bootstrap(app: &tauri::AppHandle) -> Result<(), String> {
         log_file: Some(log_file),
         ..Default::default()
     }));
+    // 窗口几何（逻辑点）就地落在数据目录里，主窗口构建时读它。
+    let saved = geometry::load(&paths.data);
+    app.manage(geometry::Store::new(&paths.data, saved));
+    app.manage(geometry::Throttle::default());
     // 报告 A5：先回收上次异常退出留下的孤儿 dsh（只认本 APP 私有目录的进程）。
     reclaim_orphan_dsh(&paths.data, &|line| {
         if let Some(state) = app.try_state::<Mutex<AppState>>() {
@@ -442,10 +474,18 @@ fn create_main_window(app: &tauri::AppHandle, url: &str) -> Result<(), String> {
     }
     let parsed: url::Url = url.parse().map_err(|e| format!("bad server URL {url}: {e}"))?;
 
+    // 上次的窗口几何（逻辑点）。先按原值建窗，构建完、显示前再按当前显示器夹取，
+    // 所以先建后调不会闪烁（窗口是 visible(false) 建出来的）。
+    let saved = app
+        .try_state::<geometry::Store>()
+        .map(|store| store.get())
+        .unwrap_or_default();
+
     let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(parsed))
         .title("DeepSeek Harness")
-        .inner_size(1280.0, 860.0)
-        .min_inner_size(800.0, 600.0)
+        .inner_size(saved.width, saved.height)
+        // 最小逻辑尺寸：比这更窄时 DSH 界面会明显挤压（尤其设置面板）。
+        .min_inner_size(geometry::MIN_W, geometry::MIN_H)
         .center()
         .visible(false)
         // Match the DSH dark theme so nothing white can flash before first paint.
@@ -458,6 +498,8 @@ fn create_main_window(app: &tauri::AppHandle, url: &str) -> Result<(), String> {
         // it earlier is what produced the white flash on every launch.
         .on_page_load(|window, event| {
             if event.event() == tauri::webview::PageLoadEvent::Finished {
+                // 桌面端适配层：DSH 的 Web UI 不带这些修正，由壳注入（见 DESKTOP_CSS）。
+                inject_desktop_css(&window);
                 let _ = window.show();
                 let _ = window.set_focus();
                 if let Some(splash) = window.get_webview_window("splash") {
@@ -467,6 +509,13 @@ fn create_main_window(app: &tauri::AppHandle, url: &str) -> Result<(), String> {
         })
         .build()
         .map_err(|e| format!("cannot open the DSH window: {e}"))?;
+
+    // 落定几何：按当前显示器夹取（换屏/换缩放/拔插外接屏都安全），并把修正值落盘。
+    let fitted = geometry::fit(&window, &saved);
+    geometry::apply(&window, &fitted);
+    if let Some(store) = app.try_state::<geometry::Store>() {
+        store.write(&fitted);
+    }
 
     // Safety net: if the page never finishes loading, reveal the window anyway
     // (the app must never end up as an invisible process).
@@ -489,6 +538,149 @@ fn is_loopback(url: &url::Url) -> bool {
             Some("127.0.0.1") | Some("localhost") | Some("::1")
         )
 }
+
+// ------------------------------------------------- 桌面端适配层（CSS 注入） ---
+
+/// 注入到 DSH 界面里的桌面端修正。
+///
+/// 为什么放在壳里而不是改 DSH 的文件：DSH 会自更新，改它的 assets 会被下一次
+/// 更新覆盖；壳的注入则是「每次加载都重新执行」，跟着 DSH 一起升级。
+///
+/// 目前只修一个已复现的问题：**设置面板左侧导航在插件多时溢出被裁**。
+/// 面板根节点 `[role=dialog][class*="_panel"]` 是 `overflow: hidden`，而里面的
+/// `<nav>` 高度被 flex 拉伸到面板高度、内容更高（实测 588 > 552），多出来的
+/// 36px 被直接裁掉 —— 后装的插件贡献的设置项（自动续跑 / 侧边卡片 / 使用统计 /
+/// 会话归档管理…）既看不到也点不到。让该 nav 自己滚动即可（已实测修复）。
+const DESKTOP_CSS: &str = r#"
+/* 设置面板左侧导航：允许滚动（插件多时最后几项原本被裁掉、点不到） */
+[role="dialog"] > nav[class*="_nav"],
+[role="dialog"] > nav {
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  min-height: 0;
+  scrollbar-width: thin;
+}
+[role="dialog"] > nav[class*="_nav"]::-webkit-scrollbar { width: 8px; }
+[role="dialog"] > nav[class*="_nav"]::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+}
+[role="dialog"] > nav[class*="_nav"]::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+/* 浮层里的滚动容器一律允许收缩：flex 子项默认 min-height:auto 会让内容顶破父级 */
+[role="dialog"] > * { min-height: 0; }
+"#;
+
+/// 把 `DESKTOP_CSS` 注入当前页面（幂等：同一个页面重复加载只保留一份）。
+///
+/// 优先用 `adoptedStyleSheets`（构造式样式表不受页面 CSP 限制），失败再退回
+/// `<style>` 标签。注入失败绝不能让界面起不来，所以整体吞掉异常。
+fn inject_desktop_css(window: &tauri::WebviewWindow) {
+    let css = serde_json::to_string(DESKTOP_CSS).unwrap_or_else(|_| "\"\"".into());
+    let script = format!(
+        r#"(function () {{
+  try {{
+    var CSS = {css};
+    var MARK = "dsh-desktop-fixes";
+    var applied = false;
+    try {{
+      if (window.CSSStyleSheet && "adoptedStyleSheets" in document) {{
+        var sheets = document.adoptedStyleSheets || [];
+        var found = null;
+        for (var i = 0; i < sheets.length; i++) {{
+          if (sheets[i].__dshMark === MARK) {{ found = sheets[i]; break; }}
+        }}
+        if (found) {{
+          found.replaceSync(CSS);
+        }} else {{
+          var sheet = new CSSStyleSheet();
+          sheet.__dshMark = MARK;
+          sheet.replaceSync(CSS);
+          document.adoptedStyleSheets = sheets.concat([sheet]);
+        }}
+        applied = true;
+      }}
+    }} catch (e) {{ applied = false; }}
+    if (!applied) {{
+      var style = document.querySelector("style[data-" + MARK + "]");
+      if (!style) {{
+        style = document.createElement("style");
+        style.setAttribute("data-" + MARK, "");
+        document.head.appendChild(style);
+      }}
+      if (style.textContent !== CSS) style.textContent = CSS;
+    }}
+  }} catch (error) {{ /* 注入失败不影响界面本身 */ }}
+}})();"#
+    );
+    let _ = window.eval(&script);
+}
+
+// --------------------------------------------------------------- 单实例守卫 ---
+
+/// 同一份数据目录**只允许一个实例**。
+///
+/// 两个实例抢同一个 `$DSH_HOME` 是真实的数据损坏路径：会话索引、settings.yaml、
+/// 凭据都是「读-改-写」，后写的会覆盖先写的。这里在窗口出现前就把第二个实例劝退：
+/// 把已有窗口带到前台（macOS 用 `open -b <bundle id>`），然后本进程退出。
+///
+/// 自测/调试需要双开时设 `DSH_DESKTOP_ALLOW_MULTI=1` 跳过守卫。
+fn claim_single_instance(app: &tauri::AppHandle) {
+    if std::env::var_os("DSH_DESKTOP_ALLOW_MULTI").is_some_and(|v| v != "0") {
+        return;
+    }
+    let Ok(paths) = Paths::resolve(app) else {
+        return; // 解析不出数据目录时不拦（宁可多开，也不能启动不了）
+    };
+    let stamp = paths.data.join("app.pid");
+
+    if let Some(pid) = std::fs::read_to_string(&stamp)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i32>().ok())
+    {
+        if pid != std::process::id() as i32 && process_is_this_app(pid) {
+            if let Some(window) = app.get_webview_window("splash") {
+                let _ = window.close();
+            }
+            raise_existing_instance(app);
+            std::process::exit(0);
+        }
+    }
+
+    let _ = std::fs::create_dir_all(&paths.data);
+    let _ = std::fs::write(&stamp, std::process::id().to_string());
+}
+
+/// 记录里的 pid 是否真的是本应用（防止 pid 复用误判）。
+fn process_is_this_app(pid: i32) -> bool {
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let command = String::from_utf8_lossy(&out.stdout);
+            command.contains("dsh-desktop") || command.contains("DeepSeekHarness")
+        }
+        _ => false,
+    }
+}
+
+/// 把已经在跑的实例带到前台（macOS 按 bundle id 唤回）。
+fn raise_existing_instance(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        let identifier = app.config().identifier.clone();
+        let _ = std::process::Command::new("open")
+            .args(["-b", &identifier])
+            .status();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+    }
+}
+
 
 // ---------------------------------------------------------------- helpers ----
 

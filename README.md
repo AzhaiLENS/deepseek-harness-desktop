@@ -266,7 +266,28 @@ DSH_NODE_MIRROR=https://npmmirror.com/mirrors/node bash scripts/vendor-runtime.s
   `HttpOnly; SameSite=Strict` 会话 Cookie，无 token 请求返回 401 —— 外壳只是把浏览器的这段流程交给系统 WebView。
 - **main 窗口不获得任何 Tauri 权限**（`capabilities/splash.json` 只覆盖 `splash`），
   且窗口导航被限制在 loopback：Harness 页面里出现的任何外部链接都无法把应用窗口带到站外。
-- 关闭 main 窗口即退出应用并终止 DSH 子进程。
+- **关窗 ≠ 退出**：点红色按钮只是隐藏窗口（服务与长任务继续跑），
+  ⌘Q / Dock 退出才会优雅关停 DSH 子进程；Dock 点图标（或再次启动）会重开窗口。
+
+**窗口与高分屏（重要）**：
+
+窗口几何（尺寸/位置/是否最大化）记在 `<app-data>/window.json` 里，**单位是逻辑点**，
+还原前按当前显示器夹取（换屏、换缩放、拔插外接屏都不会再压扁界面）。
+
+- 刻意**不使用** `tauri-plugin-window-state`：它把 `inner_size()`（**物理像素**）原样存盘，
+  再用 `set_size(PhysicalSize)` 还原。于是在 2x 高分屏上，"上次在 1x 屏记下的 1778×1200"
+  会被还原成 889×600 **逻辑点**——界面挤压、启动页底部被裁。逻辑点存储从根上消除了这类问题。
+- 主窗口最小逻辑尺寸 960×640（更窄时 DSH 界面会明显挤压），默认 1280×860。
+- 同一份数据目录**只允许一个实例**（`<app-data>/app.pid`）：两个实例抢同一个 `$DSH_HOME`
+  会互相覆盖会话索引/设置/凭据。第二个实例会把已有窗口带到前台后自己退出；
+  自测需要双开时设 `DSH_DESKTOP_ALLOW_MULTI=1`。
+
+**桌面端适配层**：主窗口页面加载完成后，外壳会 `eval` 一段 CSS（`DESKTOP_CSS`），
+只修 DSH Web UI 在桌面窗口里暴露出来的确切问题。目前一条：设置面板左侧导航
+（`<div role="dialog">` 的 `<nav>`）在插件较多时会溢出，而父级是 `overflow: hidden`——
+后装插件贡献的设置项（自动续跑/侧边卡片/使用统计/会话归档管理…）既看不到也点不到；
+补 `overflow-y: auto` 后即可滚动。放在外壳里而不是改 DSH 的文件，是因为 DSH 会自更新，
+改它的 assets 会被覆盖，而外壳的注入每次加载都重新执行、能跟着 DSH 一起升级。
 
 **设置**（`<app-data>/settings.json`，可选，全部有默认值）：
 

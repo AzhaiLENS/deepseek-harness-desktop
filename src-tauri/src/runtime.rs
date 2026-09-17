@@ -107,7 +107,23 @@ pub struct Server {
 
 impl Server {
     /// Terminate the server and everything it spawned.
+    ///
+    /// 先 SIGTERM 让 DSH 自己收尾（会话文件、插件状态落盘），宽限期内没退出才
+    /// SIGKILL。直接 SIGKILL 会在「刚跑完一轮就 ⌘Q」时丢掉最后一次写入。
     pub fn shutdown(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            // 只对直接子进程发信号；它自己的子进程由 DSH 负责收尾。
+            libc::kill(self.child.id() as i32, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return, // 已优雅退出
+                Ok(None) => std::thread::sleep(Duration::from_millis(120)),
+                Err(_) => break,
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

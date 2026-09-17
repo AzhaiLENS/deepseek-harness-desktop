@@ -74,6 +74,9 @@
         gap: 14px;
         padding: 30px 32px 24px;
         height: 100%;
+        /* flex 子项默认 min-height:auto，会被内容顶破父级 → 在高分屏/小窗上
+           表现为「底部被裁」。显式归零，让日志区自己收缩。 */
+        min-height: 0;
       }
       /* 官方 ds-hero-enter：淡入 + 上移，逐级错峰 */
       .enter {
@@ -155,6 +158,7 @@
 
       pre {
         flex: 1;
+        min-height: 0;
         margin: 0;
         padding: 10px 12px;
         background: rgba(255, 255, 255, .045);
@@ -169,6 +173,20 @@
       }
       .hint { color: var(--muted); font-size: 11.5px; }
       .hint.error { color: var(--error); }
+
+      /* 小窗兜底：早期版本的窗口几何按物理像素还原，在 2x 屏上会把启动页压成
+         310x210 逻辑点，底部日志区直接被裁。根因已修（geometry.rs 用逻辑点），
+         这里再兜一层——窗口再矮也不裁内容，优先牺牲日志区。 */
+      @media (max-height: 340px) {
+        .wrap { gap: 9px; padding: 18px 20px 14px; }
+        .phase { font-size: 15px; }
+        pre { display: none; }
+      }
+      @media (max-width: 440px) {
+        .wrap { padding: 18px 20px 14px; }
+        h1 { font-size: 13px; }
+        .badge { display: none; }
+      }
     </style>
   </head>
   <body>

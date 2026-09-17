@@ -18,7 +18,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 libc = "0.2"
 tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-window-state = "2"
+# 注意：不加 tauri-plugin-window-state —— 它按物理像素存取窗口几何，在 2x 高分屏
+# 上会把窗口缩成一半逻辑点（界面挤压、启动页被裁）。见 src/geometry.rs。
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"

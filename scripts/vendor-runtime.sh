@@ -272,6 +272,34 @@ EOF
 
 pnpm install --config.store-dir="$WORK/pnpm-store" --reporter=append-only
 
+# --------------------------- 2b. prune foreign-platform prebuilds ------------
+# Several packages ship prebuilds for EVERY platform inside one package
+# (node-pty is the big one: ~46 files / ~25 MB of darwin + linux + win32
+# binaries). Only `<platform>-<arch>` is ever loaded at runtime, so the rest is
+# dead weight in a payload that is built per platform anyway.
+PREBUILD_TAG="${PLATFORM}-${ARCH}"      # darwin-arm64 | linux-x64 | win32-arm64 ...
+PRUNED_DIRS=0
+PRUNED_KB=0
+while IFS= read -r prebuilds_dir; do
+  [ -d "$prebuilds_dir" ] || continue
+  for cand in "$prebuilds_dir"/*/; do
+    [ -d "$cand" ] || continue
+    base="$(basename "$cand")"
+    [ "$base" = "$PREBUILD_TAG" ] && continue
+    case "$base" in
+      darwin-*|linux-*|win32-*|win-*|freebsd-*)
+        kb="$(du -sk "$cand" 2>/dev/null | cut -f1)"
+        PRUNED_KB=$((PRUNED_KB + ${kb:-0}))
+        PRUNED_DIRS=$((PRUNED_DIRS + 1))
+        rm -rf "$cand"
+        ;;
+    esac
+  done
+done < <(find "$STAGE/vendor/node_modules" -type d -name prebuilds 2>/dev/null)
+if [ "$PRUNED_DIRS" -gt 0 ]; then
+  log "pruned       : $PRUNED_DIRS foreign prebuild dirs (~$((PRUNED_KB / 1024)) MB) — kept only $PREBUILD_TAG"
+fi
+
 # ------------------------------------------- 3. verify the payload -----------
 DSH_PKG="vendor/node_modules/@deepseek-ai/dsh"
 [[ -f "$STAGE/$DSH_PKG/lib/bin.js" ]] || { echo "vendor-runtime: bin.js missing at $DSH_PKG" >&2; exit 1; }

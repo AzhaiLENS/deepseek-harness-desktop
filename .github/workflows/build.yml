@@ -48,7 +48,7 @@ jobs:
           - os: ubuntu-24.04-arm
             platform: linux
             arch: arm64
-            tauri-args: "--bundles appimage"
+            tauri-args: "--bundles deb"
           - os: windows-11-arm
             platform: win32
             arch: arm64
@@ -155,7 +155,11 @@ jobs:
         run: |
           DMG=$(find src-tauri/target -type f -name "*.dmg" | head -1)
           echo "packaged artifact: $DMG"
-          MP=$(hdiutil attach "$DMG" -nobrowse -readonly | tail -1 | awk '{for(i=NF;i>0;i--) if($i ~ /^\//){print $i; exit}}')
+          # Mount at a fixed path: hdiutil's own output ends with a mount point
+          # that contains spaces ("/Volumes/DeepSeek Harness Desktop"), which
+          # field-splitting silently truncates.
+          MP="$(mktemp -d)"
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MP" >/dev/null
           echo "mounted at: $MP"
           BIN=$(find "$MP" -maxdepth 4 -type f -name dsh-desktop | head -1)
           PL=$(dirname "$(find "$MP" -type f -name 'dsh-payload-*.tar.zst' | head -1)")
@@ -164,6 +168,7 @@ jobs:
           file "$BIN"
           DSH_DESKTOP_DATA="$PWD/.selfcheck-packaged" DSH_DESKTOP_PAYLOAD="$PL" "$BIN" --self-check
           hdiutil detach "$MP" -quiet || true
+          rmdir "$MP" 2>/dev/null || true
 
       - name: Self-check inside the packaged installer (Linux)
         if: matrix.platform == 'linux'
@@ -202,6 +207,16 @@ jobs:
           $env:DSH_DESKTOP_DATA = "$env:RUNNER_TEMP\dsh-selfcheck"
           $env:DSH_DESKTOP_PAYLOAD = $pl.DirectoryName
           & $bin.FullName --self-check
+
+      - name: Report installer sizes
+        shell: bash
+        run: |
+          echo "=== bundle files, exact bytes ==="
+          while IFS= read -r f; do
+            printf "%12d  %s\n" "$(wc -c < "$f")" "${f##*/}"
+          done < <(find src-tauri/target -path '*release/bundle/*' -type f | sort)
+          echo "=== payload archive ==="
+          while IFS= read -r f; do printf "%12d  %s\n" "$(wc -c < "$f")" "${f##*/}"; done < <(find src-tauri/payload -type f)
 
       - name: Upload installers
         uses: actions/upload-artifact@v4

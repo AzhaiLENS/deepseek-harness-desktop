@@ -340,7 +340,15 @@ SHA="$(node -e "const c=require('crypto'),f=require('fs');const h=c.createHash('
 # Total tar entries: lets the desktop shell turn the extraction callback into
 # real percentage progress on the splash screen (single streaming pass).
 log "counting    : tar entries for the progress sidecar…"
-ENTRIES="$(tar -tf "$ARCHIVE" 2>/dev/null | wc -l | tr -d ' ')"
+# `tar -tf` reads the archive back — but some tar builds (notably the bsdtar
+# shipped with Windows runners) have no libzstd and fail on a .tar.zst with
+# exit 128. Fall back to counting the staged tree: `tar -c .` emits one entry
+# per staged path plus "." itself.
+ENTRIES="$(tar -tf "$ARCHIVE" 2>/dev/null | wc -l | tr -d ' ')" || ENTRIES=""
+if [ -z "$ENTRIES" ] || [ "$ENTRIES" = "0" ]; then
+  ENTRIES=$(( 1 + $(find "$STAGE" -mindepth 1 | wc -l | tr -d ' ') ))
+  log "counting    : archive not readable by tar here; counted the staged tree: $ENTRIES entries"
+fi
 
 cat > "$OUT_DIR/dsh-payload-$PLATFORM-$ARCH.json" <<EOF
 {

@@ -343,7 +343,8 @@ pub fn entry_total(archive: &Path) -> Option<u64> {
     let sidecar = archive.with_file_name(format!("{stem}.json"));
     let raw = fs::read_to_string(sidecar).ok()?;
     let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    json.get("entries").and_then(|v| v.as_u64())
+    // A zero/absent count means "unknown" — the splash must not divide by it.
+    json.get("entries").and_then(|v| v.as_u64()).filter(|n| *n > 0)
 }
 
 /// Convenience: SHA-256 of a file (used by the integrity check of a payload).

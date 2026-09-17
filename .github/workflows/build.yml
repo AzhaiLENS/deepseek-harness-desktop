@@ -185,18 +185,32 @@ jobs:
         if: matrix.platform == 'linux'
         shell: bash
         run: |
-          IMG=$(find src-tauri/target -type f -name "*.AppImage" | head -1)
-          echo "packaged artifact: $IMG"
-          chmod +x "$IMG"
           WD="$(mktemp -d)"
-          ( cd "$WD" && "$OLDPWD/$IMG" --appimage-extract >/dev/null )
-          PL=$(dirname "$(find "$WD/squashfs-root" -type f -name 'dsh-payload-*.tar.zst' | head -1)")
-          echo "payload inside installer: $PL"
-          if DSH_DESKTOP_DATA="$PWD/.selfcheck-packaged" DSH_DESKTOP_PAYLOAD="$PL" "$IMG" --self-check; then
-            echo "AppImage ran directly"
-          else
-            echo "direct AppImage run unavailable (FUSE?) — running the extracted AppRun"
-            APPDIR="$WD/squashfs-root" DSH_DESKTOP_DATA="$PWD/.selfcheck-packaged" DSH_DESKTOP_PAYLOAD="$PL" "$WD/squashfs-root/AppRun" --self-check
+          DEB=$(find src-tauri/target -type f -name "*.deb" | head -1)
+          IMG=$(find src-tauri/target -type f -name "*.AppImage" | head -1)
+          if [ -z "$DEB" ] && [ -z "$IMG" ]; then
+            echo "no Linux installer was produced"; exit 1
+          fi
+          if [ -n "$DEB" ]; then
+            echo "packaged artifact (deb): $DEB"
+            dpkg-deb -x "$DEB" "$WD/deb"
+            BIN=$(find "$WD/deb" -type f -name dsh-desktop | head -1)
+            PL=$(dirname "$(find "$WD/deb" -type f -name 'dsh-payload-*.tar.zst' | head -1)")
+            echo "binary from deb : $BIN"
+            echo "payload from deb: $PL"
+            DSH_DESKTOP_DATA="$PWD/.selfcheck-packaged" DSH_DESKTOP_PAYLOAD="$PL" "$BIN" --self-check
+          fi
+          if [ -n "$IMG" ]; then
+            echo "packaged artifact (AppImage): $IMG"
+            chmod +x "$IMG"
+            ( cd "$WD" && "$OLDPWD/$IMG" --appimage-extract >/dev/null )
+            PL2=$(dirname "$(find "$WD/squashfs-root" -type f -name 'dsh-payload-*.tar.zst' | head -1)")
+            if DSH_DESKTOP_DATA="$PWD/.selfcheck-packaged-appimage" DSH_DESKTOP_PAYLOAD="$PL2" "$IMG" --self-check; then
+              echo "AppImage ran directly"
+            else
+              echo "direct AppImage run unavailable (FUSE?) — running the extracted AppRun"
+              APPDIR="$WD/squashfs-root" DSH_DESKTOP_DATA="$PWD/.selfcheck-packaged-appimage" DSH_DESKTOP_PAYLOAD="$PL2" "$WD/squashfs-root/AppRun" --self-check
+            fi
           fi
 
       - name: Self-check inside the packaged installer (Windows)

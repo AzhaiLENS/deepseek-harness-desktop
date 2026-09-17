@@ -149,6 +149,31 @@ else
     exit 1
   fi
 
+  # ---- node runtime slimming -------------------------------------------
+  # The official Node tarball is ~139 MB uncompressed; `strip` drops ~36 MB of
+  # local symbols. macOS kills binaries whose code signature no longer matches,
+  # so re-sign ad hoc right after stripping (Linux needs no signature; PE
+  # binaries on Windows are left untouched — no strip tool there).
+  slim_node() {
+    local exe="$1"
+    case "$PLATFORM" in
+      darwin)
+        strip -x "$exe" || true
+        codesign -s - -f "$exe" 2>/dev/null || true
+        ;;
+      linux)
+        strip "$exe" 2>/dev/null || strip --strip-all "$exe" 2>/dev/null || true
+        ;;
+      win32) ;;
+    esac
+    # npm/corepack add ~17 MB and are superseded by the bundled pnpm; the app
+    # updater prefers `runtime/bin/pnpm` and only falls back to a PATH npm.
+    rm -rf "$(dirname "$exe")/lib/node_modules/npm" \
+            "$(dirname "$exe")/lib/node_modules/corepack"
+    rm -f "$(dirname "$exe")/npm" "$(dirname "$exe")/npm.cmd" \
+           "$(dirname "$exe")/npx" "$(dirname "$exe")/npx.cmd" \
+           "$(dirname "$exe")/corepack" "$(dirname "$exe")/corepack.cmd"
+  }
   mkdir -p "$WORK/node-dist"
   if [[ "$NODE_OS" == "win" ]]; then
     need unzip
@@ -161,16 +186,10 @@ else
 
   if [[ "$NODE_OS" == "win" ]]; then
     cp "$NODE_ROOT/node.exe" "$STAGE/runtime/node/"
-    # npm/corepack ship as cmd shims pointing at node_modules/npm — keep the
-    # whole layout so `npm` remains runnable from the bundled runtime.
-    cp -R "$NODE_ROOT/node_modules" "$STAGE/runtime/node/" 2>/dev/null || true
-    cp "$NODE_ROOT/npm.cmd" "$NODE_ROOT/npx.cmd" "$NODE_ROOT/corepack.cmd" "$STAGE/runtime/node/" 2>/dev/null || true
   else
     cp "$NODE_ROOT/bin/node" "$STAGE/runtime/node/"
     chmod +x "$STAGE/runtime/node/node"
-    cp -R "$NODE_ROOT/lib" "$STAGE/runtime/node/" 2>/dev/null || true
-    cp "$NODE_ROOT/bin/npm" "$NODE_ROOT/bin/npx" "$STAGE/runtime/node/" 2>/dev/null || true
-    [[ -f "$NODE_ROOT/bin/corepack" ]] && cp "$NODE_ROOT/bin/corepack" "$STAGE/runtime/node/" || true
+    slim_node "$STAGE/runtime/node/node"
   fi
   RESOLVED_NODE="$("$STAGE/runtime/node/$NODE_EXE" --version 2>/dev/null || echo "v$NODE_VERSION")"
   log "node runtime : $RESOLVED_NODE ($(du -sh "$STAGE/runtime/node" | cut -f1))"
@@ -300,6 +319,49 @@ if [ "$PRUNED_DIRS" -gt 0 ]; then
   log "pruned       : $PRUNED_DIRS foreign prebuild dirs (~$((PRUNED_KB / 1024)) MB) — kept only $PREBUILD_TAG"
 fi
 
+# --------------------- 2c. prune non-runtime files from node_modules -------
+# Source maps, TypeScript declarations, raw .ts sources, test fixtures and
+# markdown docs are dead weight at runtime. Kept: every .js/.cjs/.mjs/.json/
+# wasm/native binary and LICENSE (licences travel with the code).
+#
+# Everything here is failure-TOLERANT on purpose: a `$(pipeline)` assignment
+# inherits the pipeline's status, so under `set -e -o pipefail` one failed
+# `du` (a path already removed by an earlier rm -rf) would abort the whole
+# packaging run — which is exactly how the first attempt died silently.
+PRUNE2_FILES=0
+PRUNE2_KB=0
+PRUNE2_LIST="$(mktemp)"
+find "$STAGE/vendor/node_modules" -type f \( -name "*.map" -o -name "*.md" \) >> "$PRUNE2_LIST" 2>/dev/null || true
+find "$STAGE/vendor/node_modules" -type f \( -name "*.d.ts" -o -name "*.d.mts" -o -name "*.d.cts" \) >> "$PRUNE2_LIST" 2>/dev/null || true
+find "$STAGE/vendor/node_modules" -type f -name "*.ts" ! -name "*.d.ts" >> "$PRUNE2_LIST" 2>/dev/null || true
+find "$STAGE/vendor/node_modules" -type f \( -name "tsconfig*.json" -o -name ".travis.yml" -o -name ".npmignore" \) >> "$PRUNE2_LIST" 2>/dev/null || true
+while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  sz="$(wc -c < "$f" 2>/dev/null || echo 0)"; sz="${sz:-0}"
+  PRUNE2_KB=$(( PRUNE2_KB + sz / 1024 ))
+  PRUNE2_FILES=$(( PRUNE2_FILES + 1 ))
+  rm -f "$f" 2>/dev/null || true
+done < "$PRUNE2_LIST"
+rm -f "$PRUNE2_LIST" 2>/dev/null || true
+
+# Directory pruning: -print0 keeps paths with spaces intact, and stale nested
+# entries (their parent already removed) are skipped explicitly.
+PRUNE2_DIRLIST="$(mktemp)"
+find "$STAGE/vendor/node_modules" -type d \( -name test -o -name tests -o -name __tests__ -o -name spec \
+  -o -name docs -o -name examples -o -name benchmark -o -name .github \) -print0 >> "$PRUNE2_DIRLIST" 2>/dev/null || true
+while IFS= read -r -d '' d; do
+  [ -d "$d" ] || continue
+  kb="$( { du -sk "$d" 2>/dev/null || echo 0; } | cut -f1 )"; kb="${kb:-0}"
+  PRUNE2_KB=$(( PRUNE2_KB + kb ))
+  PRUNE2_FILES=$(( PRUNE2_FILES + 1 ))
+  rm -rf "$d" 2>/dev/null || true
+done < "$PRUNE2_DIRLIST"
+rm -f "$PRUNE2_DIRLIST" 2>/dev/null || true
+
+if [ "$PRUNE2_FILES" -gt 0 ]; then
+  log "slimmed      : $PRUNE2_FILES non-runtime files (~$(( PRUNE2_KB / 1024 )) MB of maps/decls/tests/docs) removed from node_modules"
+fi
+
 # ------------------------------------------- 3. verify the payload -----------
 DSH_PKG="vendor/node_modules/@deepseek-ai/dsh"
 [[ -f "$STAGE/$DSH_PKG/lib/bin.js" ]] || { echo "vendor-runtime: bin.js missing at $DSH_PKG" >&2; exit 1; }
@@ -350,7 +412,7 @@ log "packing      : $ARCHIVE"
 # extraction appears to work. A plain producer/consumer pipe is correct.
 if [[ "$USE_ZSTD" == "1" ]]; then
   # -h dereferences the (rare) in-tree symlinks so the archive is relocatable.
-  tar -c -h -C "$STAGE" . | zstd -q -T0 -o "$ARCHIVE" -f
+  tar -c -h -C "$STAGE" . | zstd -q -T0 -19 -o "$ARCHIVE" -f
   if ! zstd -t "$ARCHIVE" >/dev/null 2>&1; then
     echo "vendor-runtime: the produced zstd archive failed its integrity check" >&2
     exit 1
@@ -361,6 +423,28 @@ else
     echo "vendor-runtime: the produced gzip archive failed its integrity check" >&2
     exit 1
   fi
+fi
+
+# ---- post-conditions: never leave a stale or un-slimmed archive behind ------
+# A silent failure here is worse than a hard one: an old archive at the same
+# path makes a broken packaging run look successful.
+[ -f "$ARCHIVE" ] || { echo "vendor-runtime: no archive was produced at $ARCHIVE" >&2; exit 1; }
+ARCHIVE_BYTES="$(wc -c < "$ARCHIVE" | tr -d ' ')"
+[ "${ARCHIVE_BYTES:-0}" -gt 1000000 ] || { echo "vendor-runtime: archive is implausibly small (${ARCHIVE_BYTES:-0} bytes)" >&2; exit 1; }
+
+# The pruning above must be visible IN the product — assert it on the archive
+# itself (not on the staging tree, which could be pruned after packing).
+if tar -tf "$ARCHIVE" >/dev/null 2>&1; then
+  MAPS="$(tar -tf "$ARCHIVE" 2>/dev/null | grep -c '\.map$' || true)"
+  DTS="$(tar -tf "$ARCHIVE" 2>/dev/null | grep -c '\.d\.ts$' || true)"
+  NPM="$(tar -tf "$ARCHIVE" 2>/dev/null | grep -c 'lib/node_modules/npm/' || true)"
+  log "verify       : maps=$MAPS dts=$DTS npm=$NPM (all must be 0)"
+  if [ "${MAPS:-0}" != "0" ] || [ "${DTS:-0}" != "0" ] || [ "${NPM:-0}" != "0" ]; then
+    echo "vendor-runtime: slimming did not reach the archive (maps=$MAPS dts=$DTS npm=$NPM)" >&2
+    exit 1
+  fi
+else
+  log "verify       : this tar cannot read the archive back; skipping in-archive assertions"
 fi
 
 SIZE="$(du -sh "$ARCHIVE" | cut -f1)"

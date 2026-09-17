@@ -152,6 +152,9 @@ pub fn run() {
     }
     app.run(|app_handle: &tauri::AppHandle, event| match event {
         // macOS：Dock 图标点击（或再次 open）重新显示被隐藏的主窗口。
+        // 该变体仅存在于 macOS 构建中（Linux/Windows 上 RunEvent 没有 Reopen），
+        // 缺门控会让另外两端编译失败。
+        #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { .. } => {
             if let Some(w) = app_handle.get_webview_window("main") {
                 let _ = w.show();

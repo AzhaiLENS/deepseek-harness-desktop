@@ -86,6 +86,12 @@ need() {
   command -v "$1" >/dev/null 2>&1 || { echo "vendor-runtime: '$1' is required but not on PATH" >&2; exit 1; }
 }
 log() { printf '\033[36m[vendor]\033[0m %s\n' "$*"; }
+# Node is a native binary: under MSYS/MinGW (Windows runners) it cannot resolve
+# POSIX paths like /tmp/... — hand it a native path when cygpath exists.
+node_path() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
+
 
 need node
 need npm
@@ -270,7 +276,7 @@ pnpm install --config.store-dir="$WORK/pnpm-store" --reporter=append-only
 DSH_PKG="vendor/node_modules/@deepseek-ai/dsh"
 [[ -f "$STAGE/$DSH_PKG/lib/bin.js" ]] || { echo "vendor-runtime: bin.js missing at $DSH_PKG" >&2; exit 1; }
 
-RESOLVED_DSH="$(node -p "require('$STAGE/$DSH_PKG/package.json').version")"
+RESOLVED_DSH="$(node -p "require('$(node_path "$STAGE/$DSH_PKG/package.json")').version")"
 log "dsh resolved : $RESOLVED_DSH"
 
 # Absolute/escaping symlinks would break after extraction: fail loudly.
@@ -330,7 +336,7 @@ else
 fi
 
 SIZE="$(du -sh "$ARCHIVE" | cut -f1)"
-SHA="$(node -e "const c=require('crypto'),f=require('fs');const h=c.createHash('sha256');h.update(f.readFileSync(process.argv[1]));console.log(h.digest('hex'))" "$ARCHIVE")"
+SHA="$(node -e "const c=require('crypto'),f=require('fs');const h=c.createHash('sha256');h.update(f.readFileSync(process.argv[1]));console.log(h.digest('hex'))" "$(node_path "$ARCHIVE")")"
 # Total tar entries: lets the desktop shell turn the extraction callback into
 # real percentage progress on the splash screen (single streaming pass).
 log "counting    : tar entries for the progress sidecar…"

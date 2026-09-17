@@ -128,6 +128,17 @@ jobs:
       - name: Generate icons
         run: cargo tauri icon src-tauri/icons/source.png
 
+      # The cargo cache restores src-tauri/target wholesale, which also brings
+      # back installer bundles from earlier runs. Without this the artifacts and
+      # the release would carry stale installers of other formats built from
+      # older commits (and triple the apparent download size).
+      - name: Clean stale bundle output
+        shell: bash
+        run: |
+          rm -rf src-tauri/target/release/bundle src-tauri/target/*/release/bundle
+          echo "bundle dirs after clean:"
+          find src-tauri/target -maxdepth 4 -type d -name bundle | head -5 || true
+
       - name: Build the application
         run: cargo tauri build --ci ${{ matrix.tauri-args }}
 
@@ -224,12 +235,7 @@ jobs:
           name: dsh-desktop-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
             src-tauri/target/**/release/bundle/**/*.dmg
-            src-tauri/target/**/release/bundle/**/*.app.tar.gz
             src-tauri/target/**/release/bundle/**/*.deb
-            src-tauri/target/**/release/bundle/**/*.rpm
-            src-tauri/target/**/release/bundle/**/*.AppImage
-            src-tauri/target/**/release/bundle/**/*.msi
-            src-tauri/target/**/release/bundle/**/*.exe
             src-tauri/target/**/release/bundle/**/*.exe
           if-no-files-found: warn
 
@@ -237,9 +243,11 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          # One installer per platform: dmg (macOS), deb (Linux), NSIS exe
+          # (Windows). The AppImage is deliberately not shipped: it bundles
+          # WebKitGTK and is ~3x larger than the deb (158 MiB vs 50 MiB) for no
+          # benefit on a desktop that already ships GTK/WebKit.
           files: |
             src-tauri/target/**/release/bundle/**/*.dmg
             src-tauri/target/**/release/bundle/**/*.deb
-            src-tauri/target/**/release/bundle/**/*.AppImage
-            src-tauri/target/**/release/bundle/**/*.msi
             src-tauri/target/**/release/bundle/**/*.exe

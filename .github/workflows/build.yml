@@ -253,15 +253,26 @@ jobs:
             src-tauri/target/**/release/bundle/**/*.exe
           if-no-files-found: warn
 
-      - name: Attach installers to the release
-        if: startsWith(github.ref, 'refs/tags/v')
+  # Attaching from a single job keeps the upload race-free. Six concurrent
+  # build jobs hitting the same release intermittently failed with
+  # "Error saving asset", which left releases missing installers.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+
+      - name: List the installers that will be attached
+        run: find installers -type f -printf '%12s  %p\n' | sort
+
+      - name: Attach every installer to the release
         uses: softprops/action-gh-release@v2
         with:
-          # One installer per platform: dmg (macOS), deb (Linux), NSIS exe
-          # (Windows). The AppImage is deliberately not shipped: it bundles
-          # WebKitGTK and is ~3x larger than the deb (158 MiB vs 50 MiB) for no
-          # benefit on a desktop that already ships GTK/WebKit.
-          files: |
-            src-tauri/target/**/release/bundle/**/*.dmg
-            src-tauri/target/**/release/bundle/**/*.deb
-            src-tauri/target/**/release/bundle/**/*.exe
+          files: installers/**/*
+          fail_on_unmatched_files: true

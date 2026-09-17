@@ -44,6 +44,15 @@ jobs:
             platform: win32
             arch: x64
             tauri-args: ""
+          # --- ARM64 coverage: every OS ships both instruction sets ---
+          - os: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            tauri-args: ""
+          - os: windows-11-arm
+            platform: win32
+            arch: arm64
+            tauri-args: ""
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.platform }}-${{ matrix.arch }}

@@ -269,6 +269,12 @@ fn extract_archive(
     tar.set_preserve_permissions(true);
 
     let mut count: u64 = 0;
+    // Hard links (pnpm's store links many package files to one another) are
+    // recorded as `Link` entries that reference a path stored earlier in the
+    // stream. That ordering is NOT guaranteed — on some filesystems the target
+    // arrives later, and a streaming unpack then fails with "No such file or
+    // directory". Collect them and resolve after the pass instead.
+    let mut pending_links: Vec<(PathBuf, PathBuf)> = Vec::new();
     for entry in tar.entries().map_err(|e| e.to_string())? {
         let mut entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path().map_err(|e| e.to_string())?.into_owned();
@@ -278,6 +284,19 @@ fn extract_archive(
             continue;
         }
         let out = dest.join(&relative);
+        if entry.header().entry_type() == tar::EntryType::Link {
+            let target = entry
+                .link_name()
+                .map_err(|e| e.to_string())?
+                .map(|p| p.into_owned())
+                .unwrap_or_default();
+            let target: PathBuf = target
+                .components()
+                .skip_while(|c| matches!(c, std::path::Component::CurDir))
+                .collect();
+            pending_links.push((dest.join(target), out));
+            continue;
+        }
         if let Some(parent) = out.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }
@@ -286,6 +305,23 @@ fn extract_archive(
         if count % 500 == 0 {
             progress(count);
         }
+    }
+    for (target, out) in pending_links {
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+        if let Err(error) = fs::hard_link(&target, &out) {
+            // Cross-device or unsupported: fall back to a byte copy so the
+            // payload is complete either way.
+            fs::copy(&target, &out).map_err(|e| {
+                format!(
+                    "hard link {} → {} failed ({error}) and the copy fallback failed too: {e}",
+                    target.display(),
+                    out.display()
+                )
+            })?;
+        }
+        count += 1;
     }
     progress(count);
     Ok(())

@@ -85,6 +85,9 @@ pub fn run() {
     if self_check_requested() {
         std::process::exit(self_check());
     }
+    // 信号桥只存在于 Unix：macOS/Linux 用它把 TERM 变成优雅退出（回收服务进程）；
+    // Windows 无 SIGHUP，且进程终止语义不同，直接跳过。
+    #[cfg(unix)]
     install_signal_bridge();
 
     let app = tauri::Builder::default()
@@ -200,6 +203,8 @@ type Sink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 /// points at THIS app's private vendor tree AND whose parent is launchd — a
 /// user's own `dsh` CLI (different path, still-parented) can never match.
 /// Set by the signal handler when the process receives TERM/INT/HUP.
+/// (Unix only — Windows has no SIGHUP and terminates the shell directly.)
+#[cfg(unix)]
 static SIGNALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Global handle for the signal monitor thread (set shortly after build).
@@ -215,6 +220,7 @@ fn app_handle_for_signals() -> Option<tauri::AppHandle> {
     APP_HANDLE.lock().ok().and_then(|slot| slot.clone())
 }
 
+#[cfg(unix)]
 extern "C" fn on_signal(_sig: i32) {
     SIGNALLED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
@@ -225,6 +231,7 @@ extern "C" fn on_signal(_sig: i32) {
 /// child is left running as an orphan (报告 A5/A1). The handler itself only
 /// flips an atomic (async-signal-safe); a monitor thread performs the real
 /// shutdown via `AppHandle::exit`, which runs `ExitRequested` → server stop.
+#[cfg(unix)]
 fn install_signal_bridge() {
     for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         unsafe {

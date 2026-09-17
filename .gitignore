@@ -24,3 +24,6 @@ node_modules/
 *.log
 *.tar.zst
 *.tar.gz
+
+# 图标源图的原始拖入文件（生成产物已在 src-tauri/icons/）
+/已粘贴*.png

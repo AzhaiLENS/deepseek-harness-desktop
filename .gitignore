@@ -1,0 +1,26 @@
+# ---------------------------------------------------------------- build output
+# The vendored payload is ~100 MB per platform and fully reproducible
+# (scripts/vendor-runtime.sh), so build outputs stay out of the repository.
+/dist/
+/src-tauri/payload/*
+!/src-tauri/payload/README.md
+/src-tauri/target/
+/src-tauri/gen/schemas/
+/.scratch/
+
+# ------------------------------------------------------------------- toolchain
+# Rust/Node caches are kept inside the workspace in this project.
+/.toolchain/
+node_modules/
+.npm-cache/
+
+# ---------------------------------------------------------------- local notes
+# Audit / test reports describe THIS machine (absolute paths, session traces),
+# so they stay local.
+/reports/
+
+# ----------------------------------------------------------------------- noise
+.DS_Store
+*.log
+*.tar.zst
+*.tar.gz

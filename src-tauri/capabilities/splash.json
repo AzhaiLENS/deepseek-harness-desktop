@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "splash",
+  "description": "Permissions for the boot progress window only. The DSH window is loaded from the loopback server and deliberately gets NO Tauri command access: the Harness UI must run exactly as it does in a browser.",
+  "windows": ["splash"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:window:allow-close",
+    "core:app:allow-version",
+    "window-state:default"
+  ]
+}

@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DeepSeek Harness</title>
+    <!--
+      Boot collector: the shell pushes progress into this page with
+      webview.eval("window.__boot(...)") BEFORE splash.js has run — so the
+      collector is defined first and replays everything once the renderer
+      attaches. No __TAURI__ API is exposed to this window at all.
+    -->
+    <script>
+      window.__bootLog = [];
+      window.__boot = function (entry) {
+        window.__bootLog.push(entry);
+        if (window.__bootRender) window.__bootRender(entry);
+      };
+    </script>
+    <style>
+      :root {
+        color-scheme: dark;
+        /* 官方 Harness 站的设计基因：深海军蓝 + 主蓝 #4d6bfe + 辉光 #73a3d2 */
+        --bg-0: #16223f;
+        --bg-1: #121c31;
+        --bg-2: #0b1120;
+        --fg: #e6edf3;
+        --muted: #8691a1;
+        --accent: #4d6bfe;
+        --glow: #73a3d2;
+        --error: #f85149;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg-2);
+        color: var(--fg);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        user-select: none;
+        overflow: hidden;
+      }
+      /* ── 舞台：官方同款深蓝渐变 + 顶光 + 网格（边缘渐隐）── */
+      .stage {
+        position: relative;
+        height: 100%;
+        background:
+          radial-gradient(120% 90% at 18% -12%, rgba(115, 163, 210, .28) 0%, rgba(35, 71, 146, .16) 34%, transparent 62%),
+          linear-gradient(163deg, var(--bg-0) 0%, var(--bg-1) 46%, var(--bg-2) 100%);
+      }
+      .grid {
+        position: absolute; inset: 0;
+        background-image:
+          linear-gradient(90deg, rgba(255, 255, 255, .05) 1px, transparent 0px),
+          linear-gradient(rgba(255, 255, 255, .05) 1px, transparent 0px);
+        background-size: 90px 90px;
+        background-position: 0 -12px;
+        -webkit-mask-image:
+          linear-gradient(90deg, transparent 0%, #000 15%, #000 85%, transparent 100%),
+          linear-gradient(transparent 0%, #000 15%, #000 85%, transparent 100%);
+        -webkit-mask-composite: source-in;
+        mask-image:
+          linear-gradient(90deg, transparent 0%, #000 15%, #000 85%, transparent 100%),
+          linear-gradient(transparent 0%, #000 15%, #000 85%, transparent 100%);
+        mask-composite: intersect;
+        animation: grid-drift 14s linear infinite;
+      }
+      @keyframes grid-drift { to { background-position: 90px -102px; } }
+
+      .wrap {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 30px 32px 24px;
+        height: 100%;
+      }
+      /* 官方 ds-hero-enter：淡入 + 上移，逐级错峰 */
+      .enter {
+        opacity: 0;
+        animation: ds-hero-enter .8s ease-out forwards;
+      }
+      @keyframes ds-hero-enter {
+        0% { opacity: 0; transform: translateY(18px); }
+        100% { opacity: 1; transform: translateY(0); }
+      }
+
+      .brand { display: flex; align-items: center; gap: 11px; }
+      .ring {
+        width: 26px; height: 26px; border-radius: 50%;
+        position: relative;
+        display: grid; place-items: center;
+      }
+      /* 官方 rotating-border：6s 旋转描边 */
+      .ring::before {
+        content: ""; position: absolute; inset: 0; border-radius: 50%;
+        background: conic-gradient(from var(--border-angle, 0deg), transparent 12%, var(--accent) 45%, var(--glow) 55%, transparent 78%);
+        animation: rotating-border 6s linear infinite;
+        -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
+                mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
+      }
+      .ring::after {
+        content: ""; width: 9px; height: 9px; border-radius: 50%;
+        background: var(--accent);
+        box-shadow: 0 0 10px rgba(77, 107, 254, .75);
+        animation: breathe 2.2s ease-in-out infinite;
+      }
+      @property --border-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
+      @keyframes rotating-border { to { --border-angle: 360deg; } }
+      @keyframes breathe { 50% { transform: scale(.78); opacity: .6; } }
+      h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .2px; }
+      .badge {
+        font-size: 9px; font-weight: 600; letter-spacing: .14em;
+        color: var(--glow);
+        border: 1px solid rgba(115, 163, 210, .35);
+        border-radius: 4px;
+        padding: 2px 6px;
+        text-transform: uppercase;
+      }
+
+      .phase { font-size: 17px; font-weight: 600; min-height: 24px; letter-spacing: .2px; }
+      .phase.swap { animation: phase-in .34s ease-out; }
+      @keyframes phase-in { 0% { opacity: 0; transform: translateY(6px); } 100% { opacity: 1; transform: translateY(0); } }
+
+      .bar-row { display: flex; align-items: center; gap: 12px; }
+      .bar {
+        flex: 1; height: 6px; border-radius: 3px;
+        background: rgba(255, 255, 255, .08);
+        overflow: hidden;
+      }
+      .bar > i {
+        display: block; height: 100%; width: 0%;
+        border-radius: 3px;
+        background: linear-gradient(90deg, #234792, var(--accent) 55%, var(--glow));
+        box-shadow: 0 0 12px rgba(77, 107, 254, .55);
+        transition: width .45s cubic-bezier(.22, .8, .36, 1);
+        position: relative;
+      }
+      /* 行进中的流光：进度未满时才有 */
+      .bar.live > i::after {
+        content: ""; position: absolute; inset: 0;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .35), transparent);
+        transform: translateX(-100%);
+        animation: sheen 1.6s ease-in-out infinite;
+      }
+      @keyframes sheen { to { transform: translateX(100%); } }
+      .pct {
+        width: 44px; text-align: right;
+        font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--glow);
+        font-variant-numeric: tabular-nums;
+      }
+      .bar.error > i { background: var(--error); box-shadow: 0 0 12px rgba(248, 81, 73, .5); }
+      .bar.error > i::after { display: none; }
+
+      pre {
+        flex: 1;
+        margin: 0;
+        padding: 10px 12px;
+        background: rgba(255, 255, 255, .045);
+        border: 1px solid rgba(255, 255, 255, .06);
+        border-radius: 8px;
+        color: var(--muted);
+        font: 10.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        user-select: text;
+      }
+      .hint { color: var(--muted); font-size: 11.5px; }
+      .hint.error { color: var(--error); }
+    </style>
+  </head>
+  <body>
+    <div class="stage">
+      <div class="grid"></div>
+      <div class="wrap">
+        <div class="brand enter" style="animation-delay:.05s">
+          <span class="ring"></span>
+          <h1>DeepSeek Harness</h1>
+          <span class="badge">Desktop</span>
+        </div>
+        <div class="phase enter" id="phase" style="animation-delay:.15s">正在启动…</div>
+        <div class="bar-row enter" style="animation-delay:.25s">
+          <div class="bar live" id="bar"><i id="fill"></i></div>
+          <span class="pct" id="pct"></span>
+        </div>
+        <pre class="enter" id="log" style="animation-delay:.35s"></pre>
+        <div class="hint enter" id="hint" style="animation-delay:.45s">首次启动解包自带运行时，之后数秒内即可就绪。</div>
+      </div>
+    </div>
+    <script src="splash.js"></script>
+  </body>
+</html>

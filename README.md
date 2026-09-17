@@ -47,7 +47,61 @@ Windows / macOS / Linux 三平台适配，安装包体积远小于 Electron 方�
 
 ---
 
-## 二、"不影响 DSH 自动更新"是怎么保证的
+## 二、体积：这一版做了什么、省了多少（2026-09-17 实测）
+
+安装包体积（同一套构建，数字取 Actions 产物字节数）：
+
+| 平台 | 改前 | 改后 | 降幅 |
+| --- | ---: | ---: | ---: |
+| macOS arm64 | 83,933,694 | 51,524,060 | −38.6% |
+| macOS x64 | 86,098,897 | 53,731,901 | −37.6% |
+| Windows x64 | 162,124,166 | 52,680,603 | −67.5% |
+| Windows arm64 | 151,383,874 | 48,472,049 | −68.0% |
+| Linux arm64 | 336,651,130 | 52,620,521 | −84.4% |
+| Linux x64 | 341,746,501 | ≈52,600,000 | −84.6% |
+
+"改前"是 Tauri 默认把每个平台能打的格式全打一遍的结果，"改后"每端只发一种格式。
+
+运行时载荷（每平台一份，含 Node 运行时 + DSH 闭包 + pnpm）：
+
+| 指标 | 改前 | 改后 |
+| --- | ---: | ---: |
+| 归档字节 | 86,417,022 | **48,465,448**（−43.9%） |
+| 归档条目 | 30,583 | 12,767 |
+| 内含源码映射 / 类型声明 / npm | 4,365 / 6,568 / 2,381 条 | **0 / 0 / 0** |
+
+省下来的部分（都在 `scripts/vendor-runtime.sh` 里做，并且**带断言**）：
+
+1. **非运行期文件剪枝**：`*.map`、`*.d.ts`、原始 `.ts`、`test/`、`docs/`、`examples/`、`benchmark/`、`tsconfig*.json` 等共 14,229 个文件（解压后约 89 MB）——运行时永远读不到它们。
+2. **node_modules 里的外来平台预编译件**：`node-pty`、`@img` 这类包会带全部 6 个平台的二进制，只留本平台（约 23 MB/平台）。
+3. **Node 自带的 npm**：应用自带随包 pnpm 负责插件安装与更新，Node 自带的 npm（约 16 MB）不再需要；同时去掉调试符号并重新签名（macOS 上 138.5 MB → 101.9 MB）。
+4. **压缩级别**：载荷归档用 `zstd -19`。
+5. **每端只发一种安装包**：Linux 由 `deb + rpm + AppImage` 收敛为 `deb`；Windows 由 `msi + NSIS` 收敛为 `NSIS`；macOS 只发 `dmg`。
+6. **构建前清掉缓存里的旧安装包**：CI 缓存了 `src-tauri/target`，不清理就会把上一轮其它格式的安装包当成"本次产物"一起上传——这正是早先"Linux 300 MB"的另一半原因。
+
+> **为什么 Linux 不发 AppImage**：AppImage 会把 WebKitGTK 整条依赖链打包进去（`libwebkit2gtk` 98 MB + `libjavascriptcoregtk` 31 MB + ICU 30 MB …），实测 165,456,392 字节；而 `deb` 只有 52,608,722 字节（相差 3.1 倍），桌面系统本来就有 GTK/WebKit。需要便携版可自行 `cargo tauri build --bundles appimage`。
+>
+> **瘦身不牺牲功能**：载荷里的 DSH 闭包是应用真正运行的部分，删掉的是运行时读不到的文件；删除后运行时自检与三平台各自的启动自检都必须通过，否则不出包。
+
+## 三、下载与安装
+
+安装包在仓库的 **Releases** 页面，每端一份、按指令集区分：
+
+| 平台 | 文件 | 安装方式 |
+| --- | --- | --- |
+| macOS（Apple 芯片） | `DeepSeek Harness Desktop_x.y.z_aarch64.dmg` | 打开后把应用拖进"应用程序" |
+| macOS（Intel） | `DeepSeek Harness Desktop_x.y.z_x64.dmg` | 同上 |
+| Windows x64 | `DeepSeek Harness Desktop_x.y.z_x64-setup.exe` | 双击安装，无需管理员权限 |
+| Windows arm64 | `DeepSeek Harness Desktop_x.y.z_aarch64-setup.exe` | 同上 |
+| Linux x64 | `DeepSeek Harness Desktop_x.y.z_amd64.deb` | `sudo apt install ./DeepSeek*.deb` |
+| Linux arm64 | `DeepSeek Harness Desktop_x.y.z_arm64.deb` | 同上 |
+
+**每次出包都会跑两级自检，两级都通过才会发布**：
+
+1. 构建树里的程序启动一次：定位/校验/解包载荷 → 起 DSH → 换取会话令牌 → 取回 Harness 界面（HTTP 200）。
+2. **从"发布出去的那个安装包"里取出程序，再跑一次同样的自检**：macOS 挂载 dmg 后运行包内二进制、Linux 把 deb 解包后运行、Windows 静默安装到临时目录后运行。也就是说，"能编译"和"用户装完能用"是同一条判据。
+
+## 四、"不影响 DSH 自动更新"是怎么保证的
 
 DSH 没有内置的自更新命令。它的更新方式就是**包管理器更新 `@deepseek-ai/dsh` 这个包**
 （`dsh` 的发行物本身就是 npm 包，`lib/bin.js` 只负责起 profile）。
@@ -78,7 +132,7 @@ DSH 没有内置的自更新命令。它的更新方式就是**包管理器更�
 
 ---
 
-## 三、"完整、不依赖其他程序"是怎么保证的
+## 五、"完整、不依赖其他程序"是怎么保证的
 
 | 依赖 | 随包分发？ | 说明 |
 | --- | --- | --- |
@@ -115,7 +169,7 @@ DSH_DESKTOP_DATA=/tmp/dsh-check DSH_DESKTOP_PAYLOAD=./src-tauri/payload \
 
 ---
 
-## 四、跨平台说明（必须知道的一件事）
+## 六、跨平台说明（必须知道的一件事）
 
 payload 里有**平台相关的原生模块**（`koffi`、`node-pty`、`sharp`、`ripgrep` …），
 还有平台相关的 Node 二进制。因此：
@@ -159,7 +213,7 @@ payload 里有**平台相关的原生模块**（`koffi`、`node-pty`、`sharp`�
 
 ---
 
-## 五、目录结构
+## 七、目录结构
 
 ```
 .
@@ -204,7 +258,7 @@ payload 里有**平台相关的原生模块**（`koffi`、`node-pty`、`sharp`�
 
 ---
 
-## 六、本地开发与构建
+## 八、本地开发与构建
 
 前置：Node.js ≥ 20、pnpm、Rust（rustup）、平台编译工具链（macOS 需接受 Xcode 许可：
 `sudo xcodebuild -license accept`）。
@@ -255,7 +309,7 @@ DSH_NODE_MIRROR=https://npmmirror.com/mirrors/node bash scripts/vendor-runtime.s
 
 ---
 
-## 七、运行时行为
+## 九、运行时行为
 
 **启动顺序**：解析路径 → 校验 payload（有 `.json` 校验和时核对 sha256）→ 需要时解包到 staging 再换入
 → 定位 node/DSH → （可选）检查更新 → 启动 DSH 并等它打印 URL → 创建 main 窗口加载该 URL → 关闭 splash。
@@ -325,7 +379,7 @@ DSH_NODE_MIRROR=https://npmmirror.com/mirrors/node bash scripts/vendor-runtime.s
 
 ---
 
-## 八、已知取舍与后续项
+## 十、已知取舍与后续项
 
 1. **安装包体积**：约 100 MB/平台（Node ~50 MB + DSH 闭包压缩后 ~45 MB）。
    想瘦身可换成系统 Node（`--skip-node`，但会失去"零依赖"）或按需剔除 DSH 闭包里用不到的重依赖。
@@ -339,7 +393,7 @@ DSH_NODE_MIRROR=https://npmmirror.com/mirrors/node bash scripts/vendor-runtime.s
 
 ---
 
-## 九、许可
+## 十一、许可
 
 外壳代码 MIT。随包分发的 Node.js（MIT）与 `@deepseek-ai/dsh` 及其依赖
 各自遵循其原始许可，见 payload 内各包的 `LICENSE`。

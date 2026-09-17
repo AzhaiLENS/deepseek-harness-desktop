@@ -19,7 +19,7 @@ permissions:
 env:
   # Pin the toolchain so released installers are reproducible.
   NODE_VERSION: "26.7.0"
-  DSH_VERSION: "0.1.5-rc.1"
+  DSH_VERSION: "0.1.5-rc.2"
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -31,28 +31,28 @@ jobs:
           - os: macos-14
             platform: darwin
             arch: arm64
-            tauri-args: "--target aarch64-apple-darwin"
+            tauri-args: "--target aarch64-apple-darwin --bundles dmg"
           - os: macos-15-intel
             platform: darwin
             arch: x64
-            tauri-args: "--target x86_64-apple-darwin"
+            tauri-args: "--target x86_64-apple-darwin --bundles dmg"
           - os: ubuntu-22.04
             platform: linux
             arch: x64
-            tauri-args: ""
+            tauri-args: "--bundles appimage"
           - os: windows-latest
             platform: win32
             arch: x64
-            tauri-args: ""
+            tauri-args: "--bundles nsis"
           # --- ARM64 coverage: every OS ships both instruction sets ---
           - os: ubuntu-24.04-arm
             platform: linux
             arch: arm64
-            tauri-args: ""
+            tauri-args: "--bundles appimage"
           - os: windows-11-arm
             platform: win32
             arch: arm64
-            tauri-args: ""
+            tauri-args: "--bundles nsis"
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.platform }}-${{ matrix.arch }}
@@ -145,6 +145,55 @@ jobs:
           DSH_DESKTOP_PAYLOAD="$PWD/src-tauri/payload" \
           "$BIN" --self-check
 
+      # ---- Prove the PACKAGED installer works, not just the build tree -------
+      # The self-check above runs the binary from target/release; these steps
+      # install/mount the actual artifact that users download and run its
+      # self-check from inside, so a broken bundle cannot ship unnoticed.
+      - name: Self-check inside the packaged installer (macOS)
+        if: matrix.platform == 'darwin'
+        shell: bash
+        run: |
+          DMG=$(find src-tauri/target -type f -name "*.dmg" | head -1)
+          echo "packaged artifact: $DMG"
+          MP=$(hdiutil attach "$DMG" -nobrowse -readonly | tail -1 | awk '{for(i=NF;i>0;i--) if($i ~ /^\//){print $i; exit}}')
+          echo "mounted at: $MP"
+          BIN=$(find "$MP" -maxdepth 3 -type f -name dsh-desktop | head -1)
+          echo "binary inside installer: $BIN"
+          DSH_DESKTOP_DATA="$PWD/.selfcheck-packaged" "$BIN" --self-check
+          hdiutil detach "$MP" -quiet || true
+
+      - name: Self-check inside the packaged installer (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          IMG=$(find src-tauri/target -type f -name "*.AppImage" | head -1)
+          echo "packaged artifact: $IMG"
+          chmod +x "$IMG"
+          if DSH_DESKTOP_DATA="$PWD/.selfcheck-packaged" "$IMG" --self-check; then
+            echo "AppImage ran directly"
+          else
+            echo "direct AppImage run failed (FUSE?), extracting instead"
+            WD="$(mktemp -d)"; cd "$WD"
+            "$OLDPWD/$IMG" --appimage-extract >/dev/null
+            DSH_DESKTOP_DATA="$OLDPWD/.selfcheck-packaged" ./squashfs-root/AppRun --self-check
+          fi
+
+      - name: Self-check inside the packaged installer (Windows)
+        if: matrix.platform == 'win32'
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse -Path src-tauri/target -Filter *setup.exe |
+                 Select-Object -First 1
+          if (-not $exe) { throw "no NSIS installer found" }
+          Write-Host "packaged artifact: $($exe.FullName)"
+          $dir = "$env:RUNNER_TEMP\dsh-install"
+          Start-Process -FilePath $exe.FullName -ArgumentList "/S","/D=$dir" -Wait
+          $bin = Get-ChildItem -Recurse -Path $dir -Filter dsh-desktop.exe | Select-Object -First 1
+          if (-not $bin) { throw "dsh-desktop.exe not found after silent install" }
+          Write-Host "binary inside installer: $($bin.FullName)"
+          $env:DSH_DESKTOP_DATA = "$env:RUNNER_TEMP\dsh-selfcheck"
+          & $bin.FullName --self-check
+
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
@@ -157,6 +206,7 @@ jobs:
             src-tauri/target/**/release/bundle/**/*.AppImage
             src-tauri/target/**/release/bundle/**/*.msi
             src-tauri/target/**/release/bundle/**/*.exe
+            src-tauri/target/**/release/bundle/**/*.exe
           if-no-files-found: warn
 
       - name: Attach installers to the release
@@ -168,3 +218,4 @@ jobs:
             src-tauri/target/**/release/bundle/**/*.deb
             src-tauri/target/**/release/bundle/**/*.AppImage
             src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*.exe

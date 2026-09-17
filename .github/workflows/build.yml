@@ -157,9 +157,12 @@ jobs:
           echo "packaged artifact: $DMG"
           MP=$(hdiutil attach "$DMG" -nobrowse -readonly | tail -1 | awk '{for(i=NF;i>0;i--) if($i ~ /^\//){print $i; exit}}')
           echo "mounted at: $MP"
-          BIN=$(find "$MP" -maxdepth 3 -type f -name dsh-desktop | head -1)
-          echo "binary inside installer: $BIN"
-          DSH_DESKTOP_DATA="$PWD/.selfcheck-packaged" "$BIN" --self-check
+          BIN=$(find "$MP" -maxdepth 4 -type f -name dsh-desktop | head -1)
+          PL=$(dirname "$(find "$MP" -type f -name 'dsh-payload-*.tar.zst' | head -1)")
+          echo "binary inside installer : $BIN"
+          echo "payload inside installer: $PL"
+          file "$BIN"
+          DSH_DESKTOP_DATA="$PWD/.selfcheck-packaged" DSH_DESKTOP_PAYLOAD="$PL" "$BIN" --self-check
           hdiutil detach "$MP" -quiet || true
 
       - name: Self-check inside the packaged installer (Linux)
@@ -169,13 +172,15 @@ jobs:
           IMG=$(find src-tauri/target -type f -name "*.AppImage" | head -1)
           echo "packaged artifact: $IMG"
           chmod +x "$IMG"
-          if DSH_DESKTOP_DATA="$PWD/.selfcheck-packaged" "$IMG" --self-check; then
+          WD="$(mktemp -d)"
+          ( cd "$WD" && "$OLDPWD/$IMG" --appimage-extract >/dev/null )
+          PL=$(dirname "$(find "$WD/squashfs-root" -type f -name 'dsh-payload-*.tar.zst' | head -1)")
+          echo "payload inside installer: $PL"
+          if DSH_DESKTOP_DATA="$PWD/.selfcheck-packaged" DSH_DESKTOP_PAYLOAD="$PL" "$IMG" --self-check; then
             echo "AppImage ran directly"
           else
-            echo "direct AppImage run failed (FUSE?), extracting instead"
-            WD="$(mktemp -d)"; cd "$WD"
-            "$OLDPWD/$IMG" --appimage-extract >/dev/null
-            DSH_DESKTOP_DATA="$OLDPWD/.selfcheck-packaged" ./squashfs-root/AppRun --self-check
+            echo "direct AppImage run unavailable (FUSE?) — running the extracted AppRun"
+            APPDIR="$WD/squashfs-root" DSH_DESKTOP_DATA="$PWD/.selfcheck-packaged" DSH_DESKTOP_PAYLOAD="$PL" "$WD/squashfs-root/AppRun" --self-check
           fi
 
       - name: Self-check inside the packaged installer (Windows)
@@ -190,8 +195,12 @@ jobs:
           Start-Process -FilePath $exe.FullName -ArgumentList "/S","/D=$dir" -Wait
           $bin = Get-ChildItem -Recurse -Path $dir -Filter dsh-desktop.exe | Select-Object -First 1
           if (-not $bin) { throw "dsh-desktop.exe not found after silent install" }
-          Write-Host "binary inside installer: $($bin.FullName)"
+          $pl = Get-ChildItem -Recurse -Path $dir -Filter "dsh-payload-*.tar.zst" | Select-Object -First 1
+          if (-not $pl) { throw "payload not found inside the installed application" }
+          Write-Host "binary inside installer : $($bin.FullName)"
+          Write-Host "payload inside installer: $($pl.DirectoryName)"
           $env:DSH_DESKTOP_DATA = "$env:RUNNER_TEMP\dsh-selfcheck"
+          $env:DSH_DESKTOP_PAYLOAD = $pl.DirectoryName
           & $bin.FullName --self-check
 
       - name: Upload installers

@@ -68,10 +68,23 @@ impl Paths {
             _ => {
                 let mut found = PathBuf::from("payload");
                 if let Ok(exe) = std::env::current_exe() {
-                    for ancestor in exe.ancestors().skip(1).take(4) {
-                        let candidate = ancestor.join("payload");
-                        if candidate.exists() {
-                            found = candidate;
+                    // Two layouts to satisfy: the build tree (`<root>/payload`)
+                    // and a real bundle, where the payload sits in the bundle's
+                    // resource directory — macOS `Contents/Resources/payload`,
+                    // Linux AppImage `usr/lib/<app>/payload`, Windows
+                    // `resources/payload` next to the executable.
+                    for ancestor in exe.ancestors().skip(1).take(6) {
+                        for candidate in [
+                            ancestor.join("payload"),
+                            ancestor.join("Resources/payload"),
+                            ancestor.join("resources/payload"),
+                        ] {
+                            if candidate.exists() {
+                                found = candidate;
+                                break;
+                            }
+                        }
+                        if found != PathBuf::from("payload") {
                             break;
                         }
                     }

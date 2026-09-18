@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DeepSeek Harness Desktop",
+  "productName": "DeepSeek Harness Desktop 测试版",
   "mainBinaryName": "dsh-desktop",
   "version": "0.1.0",
-  "identifier": "ai.deepseek.harness.desktop",
+  "identifier": "ai.deepseek.harness.desktop.test",
   "build": {
     "frontendDist": "../ui"
   },
